@@ -26,7 +26,7 @@ repos:
     rev: v1.12.3
     hooks:
       - id: check-git-config-email
-        args: ['--domains', 'merl.com']
+        args: ['--domains', 'merl.com', 'pcl.cs.waseda.ac.jp']
 
   - repo: https://github.com/psf/black
     rev: 22.12.0

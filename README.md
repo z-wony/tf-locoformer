@@ -18,14 +18,70 @@ This repository includes source code of the TF-Locoformer model proposed in the 
 }
 ```
 
+In addition to the original TF-Locoformer, the repository also supports some variants of TF-Locoformer:
+- TF-Locoformer with no positional encoding (TF-Locoformer-NoPE) introduced in [Saijo2025Comparative]
+- TF-Locoformer with band-split encoder (BS-Locoformer) introduced in [Saijo2025Task]
+
+```
+@InProceedings{Saijo2025Comparative,
+  author    =  {Saijo, Kohei and Ogawa, Tetsuji},
+  title     =  {A Comparative Study on Positional Encoding for Time-frequency Domain Dual-path Transformer-based Source Separation Models},
+  booktitle =  {Proc. European Signal Processing Conference (EUSIPCO)},
+  year      =  2025,
+  month     =  sep
+}
+
+@InProceedings{Saijo2025Task,
+  author    =  {Saijo, Kohei and Ebbers, Janek and Germain, Fran\c{c}ois G. and Wichern, Gordon and {Le Roux}, Jonathan},
+  title     =  {Task-Aware Unified Source Separation},
+  booktitle =  {Proc. IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+  year      =  2025,
+  month     =  april
+}
+```
+
+
 ## Table of contents
 
+1. [ESPnet compatible version and standalone version](#espnet-compatible-version-and-standalone-version)
 1. [Environmental setup: Installing ESPnet from source and injecting the TF-Locoformer code](#environmental-setup-installing-espnet-from-source-and-injecting-the-tf-locoformer-code)
 2. [Using a pre-trained model](#using-a-pre-trained-model)
 3. [Example of training and inference](#example-of-training-and-inference)
 4. [Instructions for running training on each dataset in the ESPnet pipeline (Librimix, WHAMR! and DNS)](#instructions-for-running-training-on-each-dataset-in-the-espnet-pipeline)
 5. [Contributing](#contributing)
 6. [Copyright and license](#copyright-and-license)
+
+
+
+## ESPnet compatible version and standalone version
+This repository includes the TF-Locoformer model and its variants with two formats:
+
+### 1. ESPnet comppatible code
+ESPnet compatible version is placed under `espnet2/enh/separator/tflocoformer_separator.py`. This code can be used in ESPnet without any modification.
+
+If you would like to reproduce the results in [Saijo2024_TFLoco], please follow the instructions in the [next section](#environmental-setup-installing-espnet-from-source-and-injecting-the-tf-locoformer-code)
+
+### 2. Standalone code
+
+The ESPnet compatible version needs to be modified when you would like to use it in your own code, as it imports some funcions/classes from ESPnet.
+We prepared the standalone version without any dependency on ESPnet, and placed it under the `standalone/` directory.
+
+This standalone code is compatible with the pre-trained models provided in the repo (see [this section](#using-a-pre-trained-model) for more details on pre-trained models), but needs a slight modification of the keys in the state dict when loading the weights.
+Please refer to the example code below or `tests/test_tflocoformer_load_pretrained_weights.py` to know how to load the pre-trained weights.
+```python
+state_dict = torch.load("./egs2/whamr/enh1/exp/enh_train_enh_tflocoformer_raw/valid.loss.ave_5best.pth")
+
+# provided pre-trained weights have keys starting with 'separator.', but this has to be removed.
+new_state_dict = {}
+for k, v in state_dict.items():
+    new_key = ".".join(k.split(".")[1:])
+    new_state_dict[new_key] = v
+model.load_state_dict(new_state_dict, strict=True)
+```
+
+Please note that we do not provide any training recipe for this version. You can setup the ESPnet environment as instructed below if you need a training recipe.
+
+
 
 ## Environmental setup: Installing ESPnet from source and injecting the TF-Locoformer code
 
@@ -47,6 +103,7 @@ cd ./tools && ./setup_anaconda.sh /path/to/conda tflocoformer 3.10.8
 
 # Install espnet from source with other dependencies. We used torch 2.1.0 and cuda 11.8.
 # NOTE: torch version must be 2.x.x for other dependencies.
+# If you encounter issues with the ESPnet installation, this issue might be helpful https://github.com/espnet/espnet/issues/6106#issuecomment-2841967451
 make TH_VERSION=2.1.0 CUDA_VERSION=11.8
 
 # Install the RoPE package.
@@ -54,7 +111,7 @@ conda activate tflocoformer && pip install rotary-embedding-torch==0.6.1
 
 # Copy the TF-Locoformer code to ESPnet.
 # NOTE: ./copy_files_to_espnet.sh changes `espnet2/tasks/enh.py`. Please be careful when using your existing ESPnet environment.
-cd ../../ && git clone https://github.com/merlresearch/tf-locoformer.git && cd tf_locoformer
+cd ../../ && git clone https://github.com/merlresearch/tf-locoformer.git && cd tf-locoformer
 ./copy_files_to_espnet.sh /path/to/espnet-root
 ```
 

@@ -2,24 +2,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-
 import math
-from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from espnet2.enh.layers.complex_utils import new_complex_like
 from packaging.version import parse as V
 from rotary_embedding_torch import RotaryEmbedding
-
-from espnet2.enh.separator.abs_separator import AbsSeparator
 
 is_torch_2_0_plus = V(torch.__version__) >= V("2.0.0")
 
 
-class TFLocoformerSeparator(AbsSeparator):
+class TFLocoformerSeparator(nn.Module):
     """TF-Locoformer model presented in [1].
 
     Reference:
@@ -29,8 +24,6 @@ class TFLocoformerSeparator(AbsSeparator):
     Sep. 2024.
 
     Args:
-        input_dim: int
-            placeholder, not used
         num_spk: int
             number of output sources/speakers.
         n_layers: int
@@ -65,7 +58,6 @@ class TFLocoformerSeparator(AbsSeparator):
 
     def __init__(
         self,
-        input_dim,
         num_spk: int = 2,
         n_layers: int = 6,
         # general setup
@@ -90,7 +82,7 @@ class TFLocoformerSeparator(AbsSeparator):
         super().__init__()
         assert is_torch_2_0_plus, "Support only pytorch >= 2.0.0"
 
-        self._num_spk = num_spk
+        self.num_spk = num_spk
         self.n_layers = n_layers
 
         t_ksize = 3
@@ -102,10 +94,10 @@ class TFLocoformerSeparator(AbsSeparator):
 
         assert attention_dim % n_heads == 0, (attention_dim, n_heads)
         if pos_enc == "nope":
-            rope_freq = rope_time = None
+            pe_freq = pe_time = None
         elif pos_enc == "rope":
-            rope_freq = RotaryEmbedding(attention_dim // n_heads)
-            rope_time = RotaryEmbedding(attention_dim // n_heads)
+            pe_freq = RotaryEmbedding(attention_dim // n_heads)
+            pe_time = RotaryEmbedding(attention_dim // n_heads)
         else:
             raise ValueError(f"Unsupported positional encoding: {pos_enc}")
 
@@ -113,8 +105,8 @@ class TFLocoformerSeparator(AbsSeparator):
         for _ in range(n_layers):
             self.blocks.append(
                 TFLocoformerBlock(
-                    rope_freq,
-                    rope_time,
+                    pe_freq,
+                    pe_time,
                     # general setup
                     emb_dim=emb_dim,
                     norm_type=norm_type,
@@ -136,12 +128,7 @@ class TFLocoformerSeparator(AbsSeparator):
 
         self.deconv = nn.ConvTranspose2d(emb_dim, num_spk * 2, ks, padding=padding)
 
-    def forward(
-        self,
-        input: torch.Tensor,
-        ilens: torch.Tensor,
-        additional: Optional[Dict] = None,
-    ) -> Tuple[List[torch.Tensor], torch.Tensor, OrderedDict]:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward.
 
         Args:
@@ -168,32 +155,27 @@ class TFLocoformerSeparator(AbsSeparator):
         batch = torch.cat((batch0.real, batch0.imag), dim=1)  # [B, 2*M, T, F]
         n_batch, _, n_frames, n_freqs = batch.shape
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             batch = self.conv(batch)  # [B, -1, T, F]
 
         # separation
         for ii in range(self.n_layers):
             batch = self.blocks[ii](batch)  # [B, -1, T, F]
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             batch = self.deconv(batch)  # [B, num_spk*2, T, F]
         batch = batch.view([n_batch, self.num_spk, 2, n_frames, n_freqs])
 
-        batch = new_complex_like(batch0, (batch[:, :, 0], batch[:, :, 1]))
-        batch = [batch[:, src] for src in range(self.num_spk)]
+        batch = torch.complex(batch[:, :, 0], batch[:, :, 1])
 
-        return batch, ilens, OrderedDict()
-
-    @property
-    def num_spk(self):
-        return self._num_spk
+        return batch
 
 
 class TFLocoformerBlock(nn.Module):
     def __init__(
         self,
-        rope_freq,
-        rope_time,
+        pe_freq,
+        pe_time,
         # general setup
         emb_dim=128,
         norm_type="rmsgrouporm",
@@ -219,7 +201,7 @@ class TFLocoformerBlock(nn.Module):
         self.conv1d_shift = conv1d_shift
 
         self.freq_path = LocoformerBlock(
-            rope_freq,
+            pe_freq,
             # general setup
             emb_dim=emb_dim,
             norm_type=norm_type,
@@ -237,7 +219,7 @@ class TFLocoformerBlock(nn.Module):
             eps=eps,
         )
         self.frame_path = LocoformerBlock(
-            rope_time,
+            pe_time,
             # general setup
             emb_dim=emb_dim,
             norm_type=norm_type,
@@ -290,7 +272,7 @@ class TFLocoformerBlock(nn.Module):
 class LocoformerBlock(nn.Module):
     def __init__(
         self,
-        rope,
+        pe,
         # general setup
         emb_dim=128,
         norm_type="rmsgrouporm",
@@ -309,14 +291,8 @@ class LocoformerBlock(nn.Module):
     ):
         super().__init__()
 
-        FFN = {
-            "conv1d": ConvDeconv1d,
-            "swiglu_conv1d": SwiGLUConvDeconv1d,
-        }
-        Norm = {
-            "layernorm": nn.LayerNorm,
-            "rmsgroupnorm": RMSGroupNorm,
-        }
+        FFN = {"swiglu_conv1d": SwiGLUConvDeconv1d}
+        Norm = {"layernorm": nn.LayerNorm, "rmsgroupnorm": RMSGroupNorm}
         assert norm_type in Norm, norm_type
 
         self.macaron_style = isinstance(ffn_type, list) and len(ffn_type) == 2
@@ -324,6 +300,11 @@ class LocoformerBlock(nn.Module):
             assert (
                 isinstance(ffn_hidden_dim, list) and len(ffn_hidden_dim) == 2
             ), "Two FFNs required when using Macaron-style model"
+        else:
+            if not isinstance(ffn_type, list):
+                ffn_type = [ffn_type]
+            if not isinstance(ffn_hidden_dim, list):
+                ffn_hidden_dim = [ffn_hidden_dim]
 
         # initialize FFN
         self.ffn_norm = nn.ModuleList([])
@@ -353,7 +334,7 @@ class LocoformerBlock(nn.Module):
             emb_dim,
             attention_dim=attention_dim,
             n_heads=n_heads,
-            rope=rope,
+            pe=pe,
             dropout=dropout,
             flash_attention=flash_attention,
         )
@@ -385,9 +366,9 @@ class LocoformerBlock(nn.Module):
         # Self-attention
         input_ = output
         output = self.attn_norm(output)
-        output = output.view([B * T, F, C])
+        output = output.reshape([B * T, F, C])
         output = self.attn(output)
-        output = output.view([B, T, F, C]) + input_
+        output = output.reshape([B, T, F, C]) + input_
 
         # FFN after self-attention
         input_ = output
@@ -405,7 +386,7 @@ class MultiHeadSelfAttention(nn.Module):
         attention_dim,
         n_heads=8,
         dropout=0.0,
-        rope=None,
+        pe=None,
         flash_attention=False,
     ):
         super().__init__()
@@ -413,7 +394,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.n_heads = n_heads
         self.dropout = dropout
 
-        self.rope = rope
+        self.rope = pe
         self.qkv = nn.Linear(emb_dim, attention_dim * 3, bias=False)
         self.aggregate_heads = nn.Sequential(nn.Linear(attention_dim, emb_dim, bias=False), nn.Dropout(dropout))
 
@@ -427,7 +408,7 @@ class MultiHeadSelfAttention(nn.Module):
         query, key, value = self.get_qkv(input)
 
         # rotary positional encoding
-        if self.rope is not None:
+        if self.rope is not None and isinstance(self.rope, RotaryEmbedding):
             query, key = self.apply_rope(query, key)
 
         # pytorch 2.0 flash attention: q, k, v, mask, dropout, softmax_scale
@@ -451,41 +432,11 @@ class MultiHeadSelfAttention(nn.Module):
         query, key, value = x[..., 0, :], x[..., 1, :], x[..., 2, :]
         return query, key, value
 
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def apply_rope(self, query, key):
         query = self.rope.rotate_queries_or_keys(query)
         key = self.rope.rotate_queries_or_keys(key)
         return query, key
-
-
-class ConvDeconv1d(nn.Module):
-    def __init__(self, dim, dim_inner, conv1d_kernel, conv1d_shift, dropout=0.0, **kwargs):
-        super().__init__()
-
-        self.diff_ks = conv1d_kernel - conv1d_shift
-
-        self.net = nn.Sequential(
-            nn.Conv1d(dim, dim_inner, conv1d_kernel, stride=conv1d_shift),
-            nn.SiLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.ConvTranspose1d(dim_inner, dim, conv1d_kernel, stride=conv1d_shift),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        """ConvDeconv1d forward
-
-        Args:
-            x: torch.Tensor
-                Input tensor, (n_batch, seq1, seq2, channel)
-                seq1 (or seq2) is either the number of frames or freqs
-        """
-        b, s1, s2, h = x.shape
-        x = x.view(b * s1, s2, h)
-        x = x.transpose(-1, -2)
-        x = self.net(x).transpose(-1, -2)
-        x = x[..., self.diff_ks // 2 : self.diff_ks // 2 + s2, :]
-        return x.view(b, s1, s2, h)
 
 
 class SwiGLUConvDeconv1d(nn.Module):
