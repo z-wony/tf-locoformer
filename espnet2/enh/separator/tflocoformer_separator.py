@@ -324,6 +324,9 @@ class LocoformerBlock(nn.Module):
             assert (
                 isinstance(ffn_hidden_dim, list) and len(ffn_hidden_dim) == 2
             ), "Two FFNs required when using Macaron-style model"
+        else:
+            ffn_type = [ffn_type]
+            ffn_hidden_dim = [ffn_hidden_dim]
 
         # initialize FFN
         self.ffn_norm = nn.ModuleList([])
